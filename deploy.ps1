@@ -1,8 +1,5 @@
 $dst = 'D:\Heroes3\Heroes3_2026.05.01\_HD3_Data\Packs\人性化读档'
-# VS 当前项目实际输出目录在解决方案上级 Release：
-#   SaveLoadEnhance.vcxproj -> D:\ApqGit\heroes3\sp\Release\SaveLoadEnhance.dll
-# 旧脚本使用 $PSScriptRoot\Release，会复制到项目内旧 DLL，导致测试仍加载旧版本。
-$src = Join-Path (Split-Path $PSScriptRoot -Parent) 'Release'
+$src = "$PSScriptRoot\Release"
 
 if (-not (Test-Path $dst)) {
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
