@@ -28,6 +28,10 @@ static char g_log_path[MAX_PATH];
 static wchar_t g_wlog_path[MAX_PATH * 2];
 static bool  g_inside_auto_select_refresh = false;
 static bool  g_save_dialog_visible = false;  // DialogShow 时设置，析构时清除
+static bool  g_save_dialog_recently_closed = false;  // 存档窗口关闭后，等待后续 SaveGame 确认
+static DWORD g_save_dialog_recent_until = 0;
+
+static const DWORD SAVE_DIALOG_RECENT_MS = 3000;
 
 static const int MAX_LOG_FILES_TO_KEEP = 30;   // 插件加载时仅保留最近 30 个本插件日志。
 static const int MAX_LOG_FILES_TO_SCAN = 1024; // 防御上限。
@@ -199,6 +203,34 @@ static void RecordLastManualSaveOrLoad(const char* file_name, const char* source
 static bool HasLastManualSaveOrLoad()
 {
     return last_state.file_name[0] != 0;
+}
+
+static void MarkSaveDialogRecentlyClosed()
+{
+    g_save_dialog_recently_closed = true;
+    g_save_dialog_recent_until = GetTickCount() + SAVE_DIALOG_RECENT_MS;
+}
+
+static void ClearSaveDialogRecentState()
+{
+    g_save_dialog_recently_closed = false;
+    g_save_dialog_recent_until = 0;
+}
+
+static bool IsSaveDialogRecordAllowed()
+{
+    if (g_save_dialog_visible)
+        return true;
+
+    if (!g_save_dialog_recently_closed)
+        return false;
+
+    DWORD now = GetTickCount();
+    if ((LONG)(g_save_dialog_recent_until - now) >= 0)
+        return true;
+
+    ClearSaveDialogRecentState();
+    return false;
 }
 
 static void ExtractFileName(const char* save_path, char* file_name, int file_name_size)
@@ -390,12 +422,13 @@ static bool ApplyRecordedSelection(char* self)
 // hook 必须接收并传递全部 6 个参数，否则栈错位会导致崩溃。
 static int __stdcall HH_SaveGame(HiHook* h, DWORD thisPtr, const char* save_path, DWORD a3, DWORD a4, DWORD a5, DWORD a6)
 {
-    if (g_save_dialog_visible && save_path && save_path[0]) {
+    if (IsSaveDialogRecordAllowed() && save_path && save_path[0]) {
         char file_name[MAX_PATH];
         ExtractFileName(save_path, file_name, sizeof(file_name));
         if (file_name[0])
             RecordLastManualSaveOrLoad(file_name, "手动存档");
     }
+    ClearSaveDialogRecentState();
 
     THISCALL_6(void, h->GetDefaultFunc(), thisPtr, save_path, a3, a4, a5, a6);
     return 0;
@@ -411,6 +444,8 @@ static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
 
     DialogKind kind = GetDialogKind(self);
     g_save_dialog_visible = (kind == DK_SAVE);
+    if (kind == DK_SAVE)
+        ClearSaveDialogRecentState();
 
     // 读档/存档界面:如果有记录则自动选中
     if ((kind == DK_LOAD || kind == DK_SAVE) && HasLastManualSaveOrLoad())
@@ -428,13 +463,15 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 {
     if (self) {
         DialogKind kind = GetDialogKind(self);
-        if (kind == DK_SAVE)
+        if (kind == DK_SAVE) {
             g_save_dialog_visible = false;
+            MarkSaveDialogRecentlyClosed();
+            WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
+        }
 
-        // 存档/读档界面关闭时都记录当前选中文件名，确保下次打开能选中。
-        // 存档界面尤其需要：SaveGame 可能在对话框析构之后才调用，
-        // 此时 g_save_dialog_visible 已经 false，靠 SaveGame hook 无法记录。
-        if (kind == DK_SAVE || kind == DK_LOAD) {
+        // 读档界面关闭时记录当前选中文件名。
+        // 存档界面关闭不能直接记录：用户可能只是取消/关闭，并没有实际保存。
+        if (kind == DK_LOAD) {
             int selected = -1;
             __try {
                 selected = *(int*)(self + LOAD_OBJ_SELECTED);
@@ -445,7 +482,7 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
             char name[MAX_PATH] = {0};
             if (selected >= 0)
                 GetEntryNameByIndex(self, selected, name, sizeof(name));
-            const char* kind_name = (kind == DK_SAVE) ? "存档关闭" : "读档关闭";
+            const char* kind_name = "读档关闭";
             if (name[0]) {
                 RecordLastManualSaveOrLoad(name, kind_name);
             } else {
