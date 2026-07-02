@@ -67,3 +67,13 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Visual Studio / local build artifacts
+.vs/
+*.user
+Release/
+Debug/
+SaveLoadEnhance/Release/
+SaveLoadEnhance/Debug/
+x64/
+Win32/

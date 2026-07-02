@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -79,7 +79,7 @@
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <StructMemberAlignment>1Byte</StructMemberAlignment>
       <AdditionalOptions>/utf-8 /wd4235 /wd4005 /wd4267 /wd4018 /wd4553 /wd4010 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)deps;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -97,7 +97,7 @@
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <StructMemberAlignment>1Byte</StructMemberAlignment>
@@ -120,7 +120,7 @@
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <StructMemberAlignment>1Byte</StructMemberAlignment>
       <!-- /wd431x /wd4302 /wd4010：屏蔽 patcher_x86.hpp 在 x64 下的预期指针截断警告 -->
       <AdditionalOptions>/utf-8 /wd4235 /wd4311 /wd4312 /wd4302 /wd4010 %(AdditionalOptions)</AdditionalOptions>
@@ -139,7 +139,7 @@
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <StructMemberAlignment>1Byte</StructMemberAlignment>
@@ -157,14 +157,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="SaveLoadEnhance.cpp" />
-    <ClCompile Include="deps\HoMM3_GUI.cpp" />
-    <ClCompile Include="deps\HoMM3_Res.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="deps\homm3.h" />
-    <ClInclude Include="deps\patcher_x86.hpp" />
-    <ClInclude Include="deps\HoMM3_Base.h" />
-    <ClInclude Include="deps\HoMM3_GUI.h" />
+    <ClInclude Include="deps\H3API.hpp" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

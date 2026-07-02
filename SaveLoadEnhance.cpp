@@ -4,7 +4,10 @@
 //       下次打开存档/读档界面时,自动把默认选中项移到该存档所在行。
 // 启停由 HD Mod 启动器插件列表控制;只要 DLL 被加载即视为启用,不使用 ini。
 
-#include "homm3.h"
+#define _H3API_PATCHER_X86_
+#include <H3API.hpp>
+
+using namespace h3;
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -326,7 +329,7 @@ static bool ApplyRecordedSelection(char* self)
         // 会破坏输入框初始化。只设置索引和滚动,让原生消息循环自行处理。
         if (kind != DK_SAVE) {
             g_inside_auto_select_refresh = true;
-            CALL_3(void, __thiscall, ADDR_LOAD_UPDATE_SELECTED, self, target, 1);
+            THISCALL_3(void, ADDR_LOAD_UPDATE_SELECTED, self, target, 1);
             g_inside_auto_select_refresh = false;
             *(int*)(self + LOAD_OBJ_SELECTED) = target;
         }
@@ -355,7 +358,7 @@ static bool ApplyRecordedSelection(char* self)
         // 存档界面有输入框控件,在消息循环前调用 Redraw 会干扰其初始化。
         // 存档界面的 Redraw 会在消息循环开始后由原生逻辑触发。
         if (kind != DK_SAVE)
-            CALL_1(void, __thiscall, ADDR_DIALOG_REDRAW, self);
+            THISCALL_1(void, ADDR_DIALOG_REDRAW, self);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         g_inside_auto_select_refresh = false;
@@ -394,7 +397,7 @@ static int __stdcall HH_SaveGame(HiHook* h, DWORD thisPtr, const char* save_path
             RecordLastManualSaveOrLoad(file_name, "手动存档");
     }
 
-    CALL_6(void, __thiscall, h->GetDefaultFunc(), thisPtr, save_path, a3, a4, a5, a6);
+    THISCALL_6(void, h->GetDefaultFunc(), thisPtr, save_path, a3, a4, a5, a6);
     return 0;
 }
 
@@ -451,7 +454,7 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
         }
     }
 
-    CALL_2(void, __thiscall, h->GetDefaultFunc(), self, delete_flag);
+    THISCALL_2(void, h->GetDefaultFunc(), self, delete_flag);
     return 0;
 }
 
@@ -497,3 +500,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     }
     return TRUE;
 }
+
