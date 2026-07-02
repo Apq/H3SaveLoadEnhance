@@ -30,6 +30,9 @@ static bool  g_inside_auto_select_refresh = false;
 static bool  g_save_dialog_visible = false;  // DialogShow 时设置，析构时清除
 static bool  g_save_dialog_recently_closed = false;  // 存档窗口关闭后，等待后续 SaveGame 确认
 static DWORD g_save_dialog_recent_until = 0;
+static bool  g_pending_manual_load = false;  // 读档确认函数已进入,等待 LoadGame 调用返回
+static bool  g_pending_manual_load_consumed = false;
+static char  g_pending_manual_load_name[MAX_PATH];
 
 static const DWORD SAVE_DIALOG_RECENT_MS = 3000;
 
@@ -37,6 +40,8 @@ static const int MAX_LOG_FILES_TO_KEEP = 30;   // 插件加载时仅保留最近
 static const int MAX_LOG_FILES_TO_SCAN = 1024; // 防御上限。
 
 static const DWORD ADDR_H3MAIN_SAVE_GAME  = 0x4BEB60; // H3Main::SaveGame
+static const DWORD ADDR_LOAD_SAVE_CONFIRM = 0x58BFB0; // 读档/存档对话框确认处理函数(FASTCALL, ECX=对话框对象)
+static const DWORD ADDR_MANUAL_LOAD_AFTER_LOADGAME = 0x58C62E; // 手动读档路径中 call LoadGame(0x4BEFF0) 返回后的下一条指令
 static const DWORD ADDR_DIALOG_SHOW = 0x584EF4;         // 对话框显示/消息循环入口内(ESI=对话框对象,消息循环之前)
 static const DWORD ADDR_DIALOG_DESTRUCTOR = 0x583E10;   // 对话框析构函数入口(ECX=对话框对象,数据尚完整)
 static const DWORD ADDR_LOAD_UPDATE_SELECTED = 0x5857D0; // 原生"应用选择项"函数
@@ -233,6 +238,13 @@ static bool IsSaveDialogRecordAllowed()
     return false;
 }
 
+static void ClearPendingManualLoad()
+{
+    g_pending_manual_load = false;
+    g_pending_manual_load_consumed = false;
+    g_pending_manual_load_name[0] = 0;
+}
+
 static void ExtractFileName(const char* save_path, char* file_name, int file_name_size)
 {
     file_name[0] = 0;
@@ -318,6 +330,24 @@ static DialogKind GetDialogKind(char* self)
     if (b65) return DK_SAVE;
     if (b64) return DK_LOAD;
     return DK_NEWGAME;
+}
+
+static bool TryGetSelectedEntryName(char* self, char* out_name, int out_name_size)
+{
+    if (out_name && out_name_size > 0) out_name[0] = 0;
+    if (!self || !out_name || out_name_size <= 0)
+        return false;
+    if (GetDialogKind(self) != DK_LOAD)
+        return false;
+
+    int selected = -1;
+    __try {
+        selected = *(int*)(self + LOAD_OBJ_SELECTED);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return selected >= 0 && GetEntryNameByIndex(self, selected, out_name, out_name_size);
 }
 
 // 读档/存档选择窗口通用后置覆盖:在原生默认选中之后,把选择改成记录文件并刷新 UI。
@@ -434,6 +464,48 @@ static int __stdcall HH_SaveGame(HiHook* h, DWORD thisPtr, const char* save_path
     return 0;
 }
 
+// 读档/存档对话框确认处理 hook：读档分支只建立候选文件名。
+// 真正记录放在手动读档路径中 call H3Main::LoadGame 返回后的 LoHook，避免包裹底层 LoadGame 导致卡死。
+static int __stdcall HH_LoadSaveConfirm(HiHook* h, char* self)
+{
+    DialogKind kind = GetDialogKind(self);
+    char file_name[MAX_PATH];
+    file_name[0] = 0;
+    if (kind == DK_LOAD && TryGetSelectedEntryName(self, file_name, sizeof(file_name))) {
+        lstrcpynA(g_pending_manual_load_name, file_name, sizeof(g_pending_manual_load_name));
+        g_pending_manual_load = true;
+        g_pending_manual_load_consumed = false;
+    } else {
+        ClearPendingManualLoad();
+    }
+
+    int result = FASTCALL_1(int, h->GetDefaultFunc(), self);
+
+    // 如果确认处理没有走到手动 LoadGame 调用点，候选不能跨到下一次操作。
+    if (kind == DK_LOAD && g_pending_manual_load && !g_pending_manual_load_consumed)
+        WriteLog("读档未确认:确认函数返回=0x%08X,未看到 LoadGame 成功返回 '%s'", result, g_pending_manual_load_name);
+    ClearPendingManualLoad();
+
+    return result;
+}
+
+// 手动读档确认路径中,call H3Main::LoadGame(0x4BEFF0) 返回后的指令点。
+// 此处 EAX 仍是 LoadGame 返回值；成功返回 1 后才记录先前确认函数捕获的文件名。
+static int __stdcall Hook_AfterManualLoadGame(LoHook* h, HookContext* c)
+{
+    if (!g_pending_manual_load || !g_pending_manual_load_name[0])
+        return EXEC_DEFAULT;
+
+    int load_result = c ? c->eax : 0;
+    if (load_result) {
+        RecordLastManualSaveOrLoad(g_pending_manual_load_name, "手动读档");
+    } else {
+        WriteLog("读档未确认:LoadGame 返回=%d,不记录 '%s'", load_result, g_pending_manual_load_name);
+    }
+    g_pending_manual_load_consumed = true;
+    return EXEC_DEFAULT;
+}
+
 // 对话框显示 hook(0x584EF4):在对话框消息循环开始之前,自动选中记录文件。
 // 此点在 fcn.00584EC0 内部,无论窗口是新建还是复用(连续存档),每次显示都会触发。
 static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
@@ -446,6 +518,8 @@ static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
     g_save_dialog_visible = (kind == DK_SAVE);
     if (kind == DK_SAVE)
         ClearSaveDialogRecentState();
+    if (kind == DK_LOAD)
+        ClearPendingManualLoad();
 
     // 读档/存档界面:如果有记录则自动选中
     if ((kind == DK_LOAD || kind == DK_SAVE) && HasLastManualSaveOrLoad())
@@ -458,7 +532,7 @@ static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
 // HiHook SPLICE_ THISCALL_:ecx=对话框对象。
 // 注意:MSVC C++ 析构函数有隐藏的第二参数 delete_flag(0=仅析构,1=析构+delete),
 // hook 必须原样传递,否则栈清理量不匹配会导致崩溃。
-// 所有对话框关闭路径都必经此处。如果是读档界面,先记录玩家选中的文件名再调用原函数。
+// 所有对话框关闭路径都必经此处。读档取消/关闭不能记录,读档成功由确认处理 hook 记录。
 static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 {
     if (self) {
@@ -468,26 +542,8 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
             MarkSaveDialogRecentlyClosed();
             WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
         }
-
-        // 读档界面关闭时记录当前选中文件名。
-        // 存档界面关闭不能直接记录：用户可能只是取消/关闭，并没有实际保存。
         if (kind == DK_LOAD) {
-            int selected = -1;
-            __try {
-                selected = *(int*)(self + LOAD_OBJ_SELECTED);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                selected = -1;
-            }
-            char name[MAX_PATH] = {0};
-            if (selected >= 0)
-                GetEntryNameByIndex(self, selected, name, sizeof(name));
-            const char* kind_name = "读档关闭";
-            if (name[0]) {
-                RecordLastManualSaveOrLoad(name, kind_name);
-            } else {
-                WriteLog("%s:未读到文件名(index=%d)", kind_name, selected);
-            }
+            WriteLog("读档关闭:不直接记录,等待读档确认函数成功返回");
         }
     }
 
@@ -498,15 +554,17 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 // 注册插件功能。
 static void StartPlugin()
 {
-    // SaveGame 和 DialogDestructor 使用 HiHook(函数边界,安全可行)。
+    // SaveGame、读档确认函数和 DialogDestructor 使用 HiHook(函数边界,安全可行)。
     _PI->WriteHiHook(ADDR_H3MAIN_SAVE_GAME, SPLICE_, EXTENDED_, THISCALL_, HH_SaveGame);
+    _PI->WriteHiHook(ADDR_LOAD_SAVE_CONFIRM, SPLICE_, EXTENDED_, FASTCALL_, HH_LoadSaveConfirm);
     _PI->WriteHiHook(ADDR_DIALOG_DESTRUCTOR, SPLICE_, EXTENDED_, THISCALL_, HH_DialogDestructor);
 
     // DialogShow 使用 LoHook(hook 点在函数内部,HiHook 无法替代)。
     _PI->WriteLoHook(ADDR_DIALOG_SHOW, Hook_DialogShow);
+    _PI->WriteLoHook(ADDR_MANUAL_LOAD_AFTER_LOADGAME, Hook_AfterManualLoadGame);
 
-    WriteLog("SaveLoadEnhance 已启用。Hook:SaveGame@0x%08X(HiHook),DialogShow@0x%08X(LoHook),DialogDestructor@0x%08X(HiHook)。",
-        ADDR_H3MAIN_SAVE_GAME, ADDR_DIALOG_SHOW, ADDR_DIALOG_DESTRUCTOR);
+    WriteLog("SaveLoadEnhance 已启用。Hook:SaveGame@0x%08X(HiHook),LoadSaveConfirm@0x%08X(HiHook),AfterManualLoadGame@0x%08X(LoHook),DialogShow@0x%08X(LoHook),DialogDestructor@0x%08X(HiHook)。",
+        ADDR_H3MAIN_SAVE_GAME, ADDR_LOAD_SAVE_CONFIRM, ADDR_MANUAL_LOAD_AFTER_LOADGAME, ADDR_DIALOG_SHOW, ADDR_DIALOG_DESTRUCTOR);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
