@@ -34,7 +34,7 @@
 
   SaveLoadEnhance_YYYYMMDD_HHMMSS.log
 
-默认会写日志，并在插件启动后延迟清理旧日志、保留最近 30 个，仅用于调试，可以安全删除。
+默认会写日志，并在插件加载时清理旧日志、保留最近 30 个，仅用于调试，可以安全删除。
 
 可在 SaveLoadEnhance.ini 中关闭日志：
 

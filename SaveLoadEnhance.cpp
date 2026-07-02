@@ -2,7 +2,7 @@
 // 英雄无敌3 SoD HD Mod 插件「人性化读档」。
 // 功能:玩家手动存档或真正执行读档后,记录该存档名(仅进程内内存);
 //       下次打开存档/读档界面时,自动把默认选中项移到该存档所在行。
-// 启停由 HD Mod 启动器插件列表控制;ini 只用于控制日志开关。
+// 启停由 HD Mod 启动器插件列表控制;ini 仅用于控制日志开关。
 
 #define _H3API_PATCHER_X86_
 #include <H3API.hpp>
@@ -27,7 +27,6 @@ static struct LastManualSaveOrLoadState {
 static char g_log_path[MAX_PATH];
 static wchar_t g_wlog_path[MAX_PATH * 2];
 static bool  g_disable_log = false;
-static bool  g_log_cleaned = false;
 static bool  g_inside_auto_select_refresh = false;
 static bool  g_save_dialog_visible = false;  // DialogShow 时设置，析构时清除
 static bool  g_save_dialog_recently_closed = false;  // 存档窗口关闭后，等待后续 SaveGame 确认
@@ -108,7 +107,20 @@ static void SplitModulePathForLogW(const wchar_t* module_path, wchar_t* out_dir,
     }
 }
 
-static bool ReadDisableLogFromIniW(HMODULE hModule)
+static char* TrimAscii(char* s)
+{
+    if (!s) return s;
+    if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+        s += 3;
+    while (*s == ' ' || *s == '\t') ++s;
+
+    char* end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = 0;
+    return s;
+}
+
+static bool ReadDisableLogFromIniFileW(HMODULE hModule)
 {
     wchar_t module_path[MAX_PATH * 2];
     module_path[0] = 0;
@@ -116,14 +128,63 @@ static bool ReadDisableLogFromIniW(HMODULE hModule)
 
     wchar_t module_dir[MAX_PATH * 2];
     SplitModulePathForLogW(module_path, module_dir, _countof(module_dir), nullptr, 0);
-    if (!module_dir[0])
-        return false;
+    if (!module_dir[0]) return false;
 
     wchar_t ini_path[MAX_PATH * 2];
     _snwprintf_s(ini_path, _countof(ini_path), _TRUNCATE, L"%s\\SaveLoadEnhance.ini", module_dir);
 
-    int disable = GetPrivateProfileIntW(L"Logging", L"DisableLog", 0, ini_path);
-    return disable != 0;
+    HANDLE file = CreateFileW(ini_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+    char buf[4097];
+    DWORD bytes_read = 0;
+    BOOL ok = ReadFile(file, buf, sizeof(buf) - 1, &bytes_read, nullptr);
+    CloseHandle(file);
+    if (!ok || bytes_read == 0)
+        return false;
+    buf[bytes_read] = 0;
+
+    bool in_logging = false;
+    char* p = buf;
+    while (*p) {
+        char* line = p;
+        while (*p && *p != '\r' && *p != '\n') ++p;
+        if (*p) {
+            *p++ = 0;
+            if (p[-1] == '\r' && *p == '\n') ++p;
+        }
+
+        char* s = TrimAscii(line);
+        if (!s || !*s || *s == ';' || *s == '#')
+            continue;
+
+        if (*s == '[') {
+            char* close = strchr(s, ']');
+            if (!close) {
+                in_logging = false;
+                continue;
+            }
+            *close = 0;
+            char* section = TrimAscii(s + 1);
+            in_logging = section && _stricmp(section, "Logging") == 0;
+            continue;
+        }
+
+        if (!in_logging)
+            continue;
+
+        char* eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char* key = TrimAscii(s);
+        char* value = TrimAscii(eq + 1);
+        if (key && value && _stricmp(key, "DisableLog") == 0)
+            return atoi(value) != 0;
+    }
+
+    return false;
 }
 
 static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base, const wchar_t* current_log_path)
@@ -165,8 +226,9 @@ static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base,
     HeapFree(GetProcessHeap(), 0, entries);
 }
 
-static void SetupDatedLogPath(HMODULE hModule)
+static void SetupDatedLogPathAndCleanup(HMODULE hModule)
 {
+    g_disable_log = ReadDisableLogFromIniFileW(hModule);
     if (g_disable_log) {
         g_log_path[0] = 0;
         g_wlog_path[0] = 0;
@@ -187,18 +249,6 @@ static void SetupDatedLogPath(HMODULE hModule)
         log_dir, log_base, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
     WideCharToMultiByte(CP_UTF8, 0, g_wlog_path, -1, g_log_path, sizeof(g_log_path), nullptr, nullptr);
-}
-
-static void DoLogCleanupOnce()
-{
-    if (g_disable_log) return;
-    if (g_log_cleaned) return;
-    g_log_cleaned = true;
-    if (!g_wlog_path[0]) return;
-
-    wchar_t log_dir[MAX_PATH * 2];
-    wchar_t log_base[MAX_PATH * 2];
-    SplitModulePathForLogW(g_wlog_path, log_dir, _countof(log_dir), log_base, _countof(log_base));
     CleanupOldLogFilesW(log_dir, log_base, g_wlog_path);
 }
 
@@ -581,6 +631,9 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
             MarkSaveDialogRecentlyClosed();
             WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
         }
+        if (kind == DK_LOAD) {
+            WriteLog("读档关闭:不直接记录,等待读档确认函数成功返回");
+        }
     }
 
     THISCALL_2(void, h->GetDefaultFunc(), self, delete_flag);
@@ -590,8 +643,6 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 // 注册插件功能。
 static void StartPlugin()
 {
-    DoLogCleanupOnce();
-
     // SaveGame、读档确认函数和 DialogDestructor 使用 HiHook(函数边界,安全可行)。
     _PI->WriteHiHook(ADDR_H3MAIN_SAVE_GAME, SPLICE_, EXTENDED_, THISCALL_, HH_SaveGame);
     _PI->WriteHiHook(ADDR_LOAD_SAVE_CONFIRM, SPLICE_, EXTENDED_, FASTCALL_, HH_LoadSaveConfirm);
@@ -611,8 +662,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH && !initialized) {
         initialized = true;
 
-        g_disable_log = ReadDisableLogFromIniW(hModule);
-        SetupDatedLogPath(hModule);
+        SetupDatedLogPathAndCleanup(hModule);
 
         ClearLastManualSaveOrLoadState();
         WriteLog("SaveLoadEnhance 正在加载。ini 仅用于日志开关;被加载即表示已启用。");
