@@ -2,7 +2,7 @@
 // 英雄无敌3 SoD HD Mod 插件「人性化读档」。
 // 功能:玩家手动存档或真正执行读档后,记录该存档名(仅进程内内存);
 //       下次打开存档/读档界面时,自动把默认选中项移到该存档所在行。
-// 启停由 HD Mod 启动器插件列表控制;只要 DLL 被加载即视为启用,不使用 ini。
+// 启停由 HD Mod 启动器插件列表控制;ini 只用于控制日志开关。
 
 #define _H3API_PATCHER_X86_
 #include <H3API.hpp>
@@ -26,6 +26,8 @@ static struct LastManualSaveOrLoadState {
 
 static char g_log_path[MAX_PATH];
 static wchar_t g_wlog_path[MAX_PATH * 2];
+static bool  g_disable_log = false;
+static bool  g_log_cleaned = false;
 static bool  g_inside_auto_select_refresh = false;
 static bool  g_save_dialog_visible = false;  // DialogShow 时设置，析构时清除
 static bool  g_save_dialog_recently_closed = false;  // 存档窗口关闭后，等待后续 SaveGame 确认
@@ -106,6 +108,24 @@ static void SplitModulePathForLogW(const wchar_t* module_path, wchar_t* out_dir,
     }
 }
 
+static bool ReadDisableLogFromIniW(HMODULE hModule)
+{
+    wchar_t module_path[MAX_PATH * 2];
+    module_path[0] = 0;
+    GetModuleFileNameW(hModule, module_path, _countof(module_path));
+
+    wchar_t module_dir[MAX_PATH * 2];
+    SplitModulePathForLogW(module_path, module_dir, _countof(module_dir), nullptr, 0);
+    if (!module_dir[0])
+        return false;
+
+    wchar_t ini_path[MAX_PATH * 2];
+    _snwprintf_s(ini_path, _countof(ini_path), _TRUNCATE, L"%s\\SaveLoadEnhance.ini", module_dir);
+
+    int disable = GetPrivateProfileIntW(L"Logging", L"DisableLog", 0, ini_path);
+    return disable != 0;
+}
+
 static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base, const wchar_t* current_log_path)
 {
     if (!log_dir || !log_dir[0] || !log_base || !log_base[0]) return;
@@ -145,8 +165,14 @@ static void CleanupOldLogFilesW(const wchar_t* log_dir, const wchar_t* log_base,
     HeapFree(GetProcessHeap(), 0, entries);
 }
 
-static void SetupDatedLogPathAndCleanup(HMODULE hModule)
+static void SetupDatedLogPath(HMODULE hModule)
 {
+    if (g_disable_log) {
+        g_log_path[0] = 0;
+        g_wlog_path[0] = 0;
+        return;
+    }
+
     wchar_t module_path[MAX_PATH * 2];
     module_path[0] = 0;
     GetModuleFileNameW(hModule, module_path, _countof(module_path));
@@ -161,11 +187,24 @@ static void SetupDatedLogPathAndCleanup(HMODULE hModule)
         log_dir, log_base, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
     WideCharToMultiByte(CP_UTF8, 0, g_wlog_path, -1, g_log_path, sizeof(g_log_path), nullptr, nullptr);
+}
+
+static void DoLogCleanupOnce()
+{
+    if (g_disable_log) return;
+    if (g_log_cleaned) return;
+    g_log_cleaned = true;
+    if (!g_wlog_path[0]) return;
+
+    wchar_t log_dir[MAX_PATH * 2];
+    wchar_t log_base[MAX_PATH * 2];
+    SplitModulePathForLogW(g_wlog_path, log_dir, _countof(log_dir), log_base, _countof(log_base));
     CleanupOldLogFilesW(log_dir, log_base, g_wlog_path);
 }
 
 static void WriteLog(const char* fmt, ...)
 {
+    if (g_disable_log) return;
     if (!g_wlog_path[0]) return;
 
     FILE* f = nullptr;
@@ -542,9 +581,6 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
             MarkSaveDialogRecentlyClosed();
             WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
         }
-        if (kind == DK_LOAD) {
-            WriteLog("读档关闭:不直接记录,等待读档确认函数成功返回");
-        }
     }
 
     THISCALL_2(void, h->GetDefaultFunc(), self, delete_flag);
@@ -554,6 +590,8 @@ static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 // 注册插件功能。
 static void StartPlugin()
 {
+    DoLogCleanupOnce();
+
     // SaveGame、读档确认函数和 DialogDestructor 使用 HiHook(函数边界,安全可行)。
     _PI->WriteHiHook(ADDR_H3MAIN_SAVE_GAME, SPLICE_, EXTENDED_, THISCALL_, HH_SaveGame);
     _PI->WriteHiHook(ADDR_LOAD_SAVE_CONFIRM, SPLICE_, EXTENDED_, FASTCALL_, HH_LoadSaveConfirm);
@@ -573,10 +611,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH && !initialized) {
         initialized = true;
 
-        SetupDatedLogPathAndCleanup(hModule);
+        g_disable_log = ReadDisableLogFromIniW(hModule);
+        SetupDatedLogPath(hModule);
 
         ClearLastManualSaveOrLoadState();
-        WriteLog("SaveLoadEnhance 正在加载。插件没有 ini;被加载即表示已启用。");
+        WriteLog("SaveLoadEnhance 正在加载。ini 仅用于日志开关;被加载即表示已启用。");
 
         _P = GetPatcher();
         if (!_P) {

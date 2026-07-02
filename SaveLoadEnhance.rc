@@ -2,7 +2,7 @@
 //
 #include "resource.h"
 /////////////////////////////////////////////////////////////////////////////
-// 中文(简体，中国) resources
+// 锟斤拷锟斤拷(锟斤拷锟藉，锟叫癸拷) resources
 
 #if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_CHS)
 LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
@@ -14,8 +14,8 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 //
 
 IDR_VERSIONINFO VERSIONINFO
- FILEVERSION 0,4,2026,628
- PRODUCTVERSION 0,4,2026,628
+ FILEVERSION 0,5,2026,702
+ PRODUCTVERSION 0,5,2026,702
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -30,15 +30,15 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "Comments", "存档/读档 界面打开时,自动选择上次保存或加载的存档文件。\n但每次启动后如果没有存档，也没有读档，就不会界入。"
-            VALUE "CompanyName", "Heroes3 SP 插件"
-            VALUE "FileDescription", "英雄无敌3 HD Mod 存档读档增强插件"
-            VALUE "FileVersion", "0.4.2026.628"
+            VALUE "Comments", "Remember the last manual save/load file during the current game session."
+            VALUE "CompanyName", "Apq"
+            VALUE "FileDescription", "Heroes3 HD Mod SaveLoadEnhance"
+            VALUE "FileVersion", "0.5.2026.702"
             VALUE "InternalName", "SaveLoadEnhance"
             VALUE "LegalCopyright", "Copyright (C) Apq"
             VALUE "OriginalFilename", "SaveLoadEnhance.dll"
             VALUE "ProductName", "SaveLoadEnhance"
-            VALUE "ProductVersion", "0.4.2026.628"
+            VALUE "ProductVersion", "0.5.2026.702"
         END
     END
     BLOCK "VarFileInfo"
@@ -72,7 +72,7 @@ END
 
 #endif    // APSTUDIO_INVOKED
 
-#endif    // 中文(简体，中国) resources
+#endif    // 锟斤拷锟斤拷(锟斤拷锟藉，锟叫癸拷) resources
 /////////////////////////////////////////////////////////////////////////////
 
 
