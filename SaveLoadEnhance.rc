@@ -32,7 +32,7 @@ BEGIN
         BEGIN
             VALUE "Comments", "存档/读档 界面打开时,自动选择上次保存或加载的存档文件"
             VALUE "CompanyName", "Apq"
-            VALUE "FileDescription", "Heroes3 HD Mod SaveLoadEnhance"
+            VALUE "FileDescription", "存档/读档 界面打开时,自动选择上次保存或加载的存档文件"
             VALUE "FileVersion", "0.5.2026.702"
             VALUE "InternalName", "SaveLoadEnhance"
             VALUE "LegalCopyright", "Copyright (C) Apq"
