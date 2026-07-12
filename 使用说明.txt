@@ -46,3 +46,8 @@
 版本
 ----
 当前 DLL 版本：0.5.2026.702
+
+开源地址
+--------
+GitHub：https://github.com/Apq/H3SaveLoadEnhance
+Gitee：  https://gitee.com/Apq/H3SaveLoadEnhance
