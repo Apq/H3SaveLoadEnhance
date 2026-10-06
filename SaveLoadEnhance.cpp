@@ -17,6 +17,16 @@ using namespace h3;
 Patcher*         _P  = nullptr;
 PatcherInstance* _PI = nullptr;
 
+// 崩溃防御（CrashGuard，见 CrashGuard.hpp 头注释 / 技能 h3-plugin-crash-guard）。
+#include "CrashGuard.hpp"
+
+// 本插件的钩子 id（静态初始化期注册，DllMain 之前完成）。
+static const int GUARD_SAVE_GAME    = GuardRegisterHook_("SaveGame");
+static const int GUARD_CONFIRM      = GuardRegisterHook_("LoadSaveConfirm");
+static const int GUARD_AFTER_LOAD   = GuardRegisterHook_("AfterManualLoadGame");
+static const int GUARD_DIALOG_SHOW  = GuardRegisterHook_("DialogShow");
+static const int GUARD_DLG_DTOR     = GuardRegisterHook_("DialogDestructor");
+
 // ========== 进程内状态 ==========
 
 static struct LastManualSaveOrLoadState {
@@ -539,15 +549,20 @@ static bool ApplyRecordedSelection(char* self)
 // SaveGame hook：存档界面可见时的保存视为手动存档，记录文件名供下次自动选中。
 // H3Main::SaveGame 实际签名为 THISCALL_6(VOID, 0x4BEB60, this, save_name, a3, a4, a5, a6)，
 // hook 必须接收并传递全部 6 个参数，否则栈错位会导致崩溃。
+// 铠甲（CrashGuard L2）：功能型插件——自有逻辑 __try，异常吞掉落盘后
+// 原函数仍照常调用（存档绝不能丢）；原函数在 __try 之外，游戏自身的
+// 崩溃不吞（§18 边界）。
 static int __stdcall HH_SaveGame(HiHook* h, DWORD thisPtr, const char* save_path, DWORD a3, DWORD a4, DWORD a5, DWORD a6)
 {
-    if (IsSaveDialogRecordAllowed() && save_path && save_path[0]) {
-        char file_name[MAX_PATH];
-        ExtractFileName(save_path, file_name, sizeof(file_name));
-        if (file_name[0])
-            RecordLastManualSaveOrLoad(file_name, "手动存档");
-    }
-    ClearSaveDialogRecentState();
+    __try {
+        if (IsSaveDialogRecordAllowed() && save_path && save_path[0]) {
+            char file_name[MAX_PATH];
+            ExtractFileName(save_path, file_name, sizeof(file_name));
+            if (file_name[0])
+                RecordLastManualSaveOrLoad(file_name, "手动存档");
+        }
+        ClearSaveDialogRecentState();
+    } __except (GuardCrashFilter_(GUARD_SAVE_GAME, GetExceptionInformation())) {}
 
     THISCALL_6(void, h->GetDefaultFunc(), thisPtr, save_path, a3, a4, a5, a6);
     return 0;
@@ -555,65 +570,83 @@ static int __stdcall HH_SaveGame(HiHook* h, DWORD thisPtr, const char* save_path
 
 // 读档/存档对话框确认处理 hook：读档分支只建立候选文件名。
 // 真正记录放在手动读档路径中 call H3Main::LoadGame 返回后的 LoHook，避免包裹底层 LoadGame 导致卡死。
+// 铠甲（CrashGuard L2）：前置候选段与后置检查段各自 __try；原函数调用
+// 在两段 __try 之外——读档动作必须恰好执行一次（异常兜底绝不重调原函数，
+// 防双执行），游戏自身的崩溃不吞。异常时清候选防跨次泄漏。
 static int __stdcall HH_LoadSaveConfirm(HiHook* h, char* self)
 {
-    DialogKind kind = GetDialogKind(self);
-    char file_name[MAX_PATH];
-    file_name[0] = 0;
-    if (kind == DK_LOAD && TryGetSelectedEntryName(self, file_name, sizeof(file_name))) {
-        lstrcpynA(g_pending_manual_load_name, file_name, sizeof(g_pending_manual_load_name));
-        g_pending_manual_load = true;
-        g_pending_manual_load_consumed = false;
-    } else {
+    __try {
+        DialogKind kind = GetDialogKind(self);
+        char file_name[MAX_PATH];
+        file_name[0] = 0;
+        if (kind == DK_LOAD && TryGetSelectedEntryName(self, file_name, sizeof(file_name))) {
+            lstrcpynA(g_pending_manual_load_name, file_name, sizeof(g_pending_manual_load_name));
+            g_pending_manual_load = true;
+            g_pending_manual_load_consumed = false;
+        } else {
+            ClearPendingManualLoad();
+        }
+    } __except (GuardCrashFilter_(GUARD_CONFIRM, GetExceptionInformation())) {
         ClearPendingManualLoad();
     }
 
     int result = FASTCALL_1(int, h->GetDefaultFunc(), self);
 
     // 如果确认处理没有走到手动 LoadGame 调用点，候选不能跨到下一次操作。
-    if (kind == DK_LOAD && g_pending_manual_load && !g_pending_manual_load_consumed)
-        WriteLog("读档未确认:确认函数返回=0x%08X,未看到 LoadGame 成功返回 '%s'", result, g_pending_manual_load_name);
-    ClearPendingManualLoad();
+    // （非 DK_LOAD 时前置段已清候选，此处 pending 必为 false，语义同原版。）
+    __try {
+        if (g_pending_manual_load && !g_pending_manual_load_consumed)
+            WriteLog("读档未确认:确认函数返回=0x%08X,未看到 LoadGame 成功返回 '%s'", result, g_pending_manual_load_name);
+        ClearPendingManualLoad();
+    } __except (GuardCrashFilter_(GUARD_CONFIRM, GetExceptionInformation())) {
+        ClearPendingManualLoad();
+    }
 
     return result;
 }
 
 // 手动读档确认路径中,call H3Main::LoadGame(0x4BEFF0) 返回后的指令点。
 // 此处 EAX 仍是 LoadGame 返回值；成功返回 1 后才记录先前确认函数捕获的文件名。
+// 铠甲（CrashGuard L2）：LoHook 整函数 __try（不主动调原函数，无双重
+// 执行问题），安全默认 EXEC_DEFAULT 放行。
 static int __stdcall Hook_AfterManualLoadGame(LoHook* h, HookContext* c)
 {
-    if (!g_pending_manual_load || !g_pending_manual_load_name[0])
-        return EXEC_DEFAULT;
+    __try {
+        if (!g_pending_manual_load || !g_pending_manual_load_name[0])
+            return EXEC_DEFAULT;
 
-    int load_result = c ? c->eax : 0;
-    if (load_result) {
-        RecordLastManualSaveOrLoad(g_pending_manual_load_name, "手动读档");
-    } else {
-        WriteLog("读档未确认:LoadGame 返回=%d,不记录 '%s'", load_result, g_pending_manual_load_name);
-    }
-    g_pending_manual_load_consumed = true;
+        int load_result = c ? c->eax : 0;
+        if (load_result) {
+            RecordLastManualSaveOrLoad(g_pending_manual_load_name, "手动读档");
+        } else {
+            WriteLog("读档未确认:LoadGame 返回=%d,不记录 '%s'", load_result, g_pending_manual_load_name);
+        }
+        g_pending_manual_load_consumed = true;
+    } __except (GuardCrashFilter_(GUARD_AFTER_LOAD, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
 // 对话框显示 hook(0x584EF4):在对话框消息循环开始之前,自动选中记录文件。
 // 此点在 fcn.00584EC0 内部,无论窗口是新建还是复用(连续存档),每次显示都会触发。
+// 铠甲（CrashGuard L2）：同 Hook_AfterManualLoadGame——LoHook 整包 __try。
 static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
 {
-    char* self = (char*)c->esi;
-    if (!self)
-        return EXEC_DEFAULT;
+    __try {
+        char* self = (char*)c->esi;
+        if (!self)
+            return EXEC_DEFAULT;
 
-    DialogKind kind = GetDialogKind(self);
-    g_save_dialog_visible = (kind == DK_SAVE);
-    if (kind == DK_SAVE)
-        ClearSaveDialogRecentState();
-    if (kind == DK_LOAD)
-        ClearPendingManualLoad();
+        DialogKind kind = GetDialogKind(self);
+        g_save_dialog_visible = (kind == DK_SAVE);
+        if (kind == DK_SAVE)
+            ClearSaveDialogRecentState();
+        if (kind == DK_LOAD)
+            ClearPendingManualLoad();
 
-    // 读档/存档界面:如果有记录则自动选中
-    if ((kind == DK_LOAD || kind == DK_SAVE) && HasLastManualSaveOrLoad())
-        ApplyRecordedSelection(self);
-
+        // 读档/存档界面:如果有记录则自动选中
+        if ((kind == DK_LOAD || kind == DK_SAVE) && HasLastManualSaveOrLoad())
+            ApplyRecordedSelection(self);
+    } __except (GuardCrashFilter_(GUARD_DIALOG_SHOW, GetExceptionInformation())) {}
     return EXEC_DEFAULT;
 }
 
@@ -622,19 +655,24 @@ static int __stdcall Hook_DialogShow(LoHook* h, HookContext* c)
 // 注意:MSVC C++ 析构函数有隐藏的第二参数 delete_flag(0=仅析构,1=析构+delete),
 // hook 必须原样传递,否则栈清理量不匹配会导致崩溃。
 // 所有对话框关闭路径都必经此处。读档取消/关闭不能记录,读档成功由确认处理 hook 记录。
+// 铠甲（CrashGuard L2）：功能型——前置标记段 __try，异常吞掉落盘；
+// 析构原函数在 __try 之外必须执行（不执行会泄漏对话框），游戏自身的
+// 崩溃不吞。
 static int __stdcall HH_DialogDestructor(HiHook* h, char* self, int delete_flag)
 {
-    if (self) {
-        DialogKind kind = GetDialogKind(self);
-        if (kind == DK_SAVE) {
-            g_save_dialog_visible = false;
-            MarkSaveDialogRecentlyClosed();
-            WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
+    __try {
+        if (self) {
+            DialogKind kind = GetDialogKind(self);
+            if (kind == DK_SAVE) {
+                g_save_dialog_visible = false;
+                MarkSaveDialogRecentlyClosed();
+                WriteLog("存档关闭:不直接记录,等待 SaveGame 确认真正保存");
+            }
+            if (kind == DK_LOAD) {
+                WriteLog("读档关闭:不直接记录,等待读档确认函数成功返回");
+            }
         }
-        if (kind == DK_LOAD) {
-            WriteLog("读档关闭:不直接记录,等待读档确认函数成功返回");
-        }
-    }
+    } __except (GuardCrashFilter_(GUARD_DLG_DTOR, GetExceptionInformation())) {}
 
     THISCALL_2(void, h->GetDefaultFunc(), self, delete_flag);
     return 0;
@@ -664,6 +702,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 
         SetupDatedLogPathAndCleanup(hModule);
 
+        // CrashGuard L1：无条件安装崩溃自记录（版本不对也要能记录崩溃）。
+        // DisableLog 时 g_wlog_path 为空，防御日志随之关闭。
+        GuardSetLogPathW(g_wlog_path);
+        InstallCrashGuard();
+
         ClearLastManualSaveOrLoadState();
         WriteLog("SaveLoadEnhance 正在加载。ini 仅用于日志开关;被加载即表示已启用。");
 
@@ -679,8 +722,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
             return TRUE;
         }
 
+        // CrashGuard L4 版本门卫：SoD 数据指纹不吻合（完整版/HotA/改版 exe）
+        // 时不挂钩——偏移错配的代价比失去功能大得多。
+        if (!GuardVerifySodBytes_()) {
+            WriteLog("[Guard] 版本门卫不通过:已停用全部钩子(仅保留日志与崩溃自记录)。");
+            return TRUE;
+        }
+
         WriteLog("Patcher 实例已创建:HD.Plugin.SaveLoadEnhance");
         StartPlugin();
+    } else if (reason == DLL_PROCESS_DETACH) {
+        // 判读生死标记:日志末尾有此行 = 正常退出;没有 = 崩溃/强杀。
+        GuardShutdown();
     }
     return TRUE;
 }
