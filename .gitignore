@@ -72,7 +72,8 @@ Testing/
 # Visual Studio / local build artifacts
 .vs/
 *.user
-Release/
+Release/*
+!Release/*.zip
 Debug/
 SaveLoadEnhance/Release/
 SaveLoadEnhance/Debug/
